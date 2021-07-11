@@ -47,7 +47,13 @@ const Win32Errors = error{
 
 const D3D11Errors = error{
     InvalidSampleCount,
-    FailedToCreateDevice,
+    FailedToCreateDXGIDevice,
+    FailedToCreateD3D11Device,
+    FailedToCreateD3D11DeviceContext,
+    FailedToCreateD3D11Device1,
+    FailedToCreateD3D11DeviceContext1,
+    FailedToCreateD3D11DeviceAndSwapchain,
+    FailedToCreateSwapchain,
     FailedToObtainBufferFromSwapChain,
     FailedToCreateTexture2D,
     FailedToCreateRenderTargetView,
@@ -65,8 +71,8 @@ const D3D11Errors = error{
 };
 
 const D3D11State = struct {
-    device: *ID3D11Device = undefined,
-    device_context: *ID3D11DeviceContext = undefined,
+    device: *ID3D11Device1 = undefined,
+    device_context: *ID3D11DeviceContext1 = undefined,
 
     swap_chain: *IDXGISwapChain = undefined,
     swap_chain_desc: DXGI_SWAP_CHAIN_DESC = undefined,
@@ -82,8 +88,8 @@ const D3D11State = struct {
     pixel_shader: *ID3D11PixelShader = undefined,
 
     sampler_state: *ID3D11SamplerState = undefined,
-    rasterizer_state: *ID3D11RasterizerState = undefined,
-    blend_state: *ID3D11BlendState = undefined,
+    rasterizer_state: *ID3D11RasterizerState1 = undefined,
+    blend_state: *ID3D11BlendState1 = undefined,
     depth_stencil_state: *ID3D11DepthStencilState = undefined,
 
     vertex_buffer: *ID3D11Buffer = undefined,
@@ -205,6 +211,51 @@ fn d3d11_init(window_handle: HWND, sample_count: u32) !D3D11State {
     var state = D3D11State{};
     errdefer d3d11_term(&state);
 
+    // Create base device to request approperiate device later
+    var feature_levels = [_]D3D_FEATURE_LEVEL{D3D_FEATURE_LEVEL_11_1};
+    var base_device: *ID3D11Device = undefined;
+    var base_device_context: *ID3D11DeviceContext = undefined;
+    var device_flags: D3D11_CREATE_DEVICE_FLAG = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    var hr = D3D11CreateDevice(
+        null,
+        D3D_DRIVER_TYPE_HARDWARE,
+        LoadLibraryA("dummy"), // This should be an optional pointer?
+        device_flags,
+        &feature_levels,
+        feature_levels.len,
+        D3D11_SDK_VERSION,
+        &base_device,
+        null,
+        &base_device_context,
+    );
+    if (FAILED(hr)) {
+        return D3D11Errors.FailedToCreateD3D11Device;
+    }
+
+    // Create ID3D11Device1
+    hr = base_device.IUnknown_QueryInterface(IID_ID3D11Device1, @ptrCast(**c_void, &state.device));
+    if (FAILED(hr)) {
+        return D3D11Errors.FailedToCreateD3D11Device1;
+    }
+
+    // Create ID3D11DeviceContext1
+    hr = base_device_context.IUnknown_QueryInterface(IID_ID3D11DeviceContext1, @ptrCast(**c_void, &state.device_context));
+    if (FAILED(hr)) {
+        return D3D11Errors.FailedToCreateD3D11DeviceContext1;
+    }
+
+    // Get the DXGI objects in order to get the access to swap chain creation calls
+    var dxgi_device: *IDXGIDevice1 = undefined;
+    var dxgi_adapter: *IDXGIAdapter = undefined;
+    var dxgi_factory: *IDXGIFactory2 = undefined;
+    hr = state.device.IUnknown_QueryInterface(IID_IDXGIDevice1, @ptrCast(**c_void, &dxgi_device));
+    if (FAILED(hr)) {
+        return D3D11Errors.FailedToCreateDXGIDevice;
+    }
+
+    // Cleanup
+    _ = base_device.IUnknown_Release();
+
     state.width = @intCast(u32, window_rectangle.right - window_rectangle.left);
     state.height = @intCast(u32, window_rectangle.bottom - window_rectangle.top);
     state.sample_count = sample_count;
@@ -237,7 +288,7 @@ fn d3d11_init(window_handle: HWND, sample_count: u32) !D3D11State {
 
     var feature_level: D3D_FEATURE_LEVEL = D3D_FEATURE_LEVEL_11_0;
 
-    var hr = D3D11CreateDeviceAndSwapChain(null, // pAdapter (use default)
+    hr = D3D11CreateDeviceAndSwapChain(null, // pAdapter (use default)
         D3D_DRIVER_TYPE_HARDWARE, // DriverType
         LoadLibraryA("dummy"), // Need a way to pass NULL here // Software
         create_flags, // Flags
@@ -251,7 +302,7 @@ fn d3d11_init(window_handle: HWND, sample_count: u32) !D3D11State {
         &state.device_context); // ppImmediateContext
 
     if (FAILED(hr)) {
-        return D3D11Errors.FailedToCreateDevice;
+        return D3D11Errors.FailedToCreateDeviceAndSwapchain;
     }
 
     // Render targets - TODO(maciej): Inline this maybe? Seems like for this demo app we would like to have everything just as a big linear function
