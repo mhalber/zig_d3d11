@@ -129,24 +129,22 @@ fn window_process_events() bool {
 fn window_create(name: [*:0]const u8, width: i32, height: i32) !HWND {
     var hInstance = @ptrCast(HINSTANCE, GetModuleHandleA(null));
 
-    var win_class_name = "d3d11_window_zig";
-
-    var win_class = WNDCLASSEXA{
-        .cbSize = @sizeOf(WNDCLASSEXA),
-        .style = CS_OWNDC,
-        .lpfnWndProc = window_procedure,
-        .cbClsExtra = 0,
-        .cbWndExtra = 0,
-        .hInstance = hInstance,
-        .hIcon = LoadIcon(hInstance, IDI_APPLICATION),
-        .hCursor = LoadCursor(null, IDC_ARROW),
-        .hbrBackground = @intToPtr(HBRUSH, @enumToInt(COLOR_WINDOW) + 1),
-        .lpszMenuName = "dummy", // Impossible to pass null?
-        .lpszClassName = win_class_name,
-        .hIconSm = LoadIcon(hInstance, IDI_APPLICATION),
+    var window_class_name = "d3d11_window_zig";
+    var window_class_style = [_]WNDCLASS_STYLES{
+        CS_HREDRAW,
+        CS_VREDRAW,
+        CS_OWNDC,
     };
 
-    var hr = RegisterClassExA(&win_class);
+    var window_class = std.mem.zeroes(WNDCLASSEXA);
+    window_class.cbSize = @sizeOf(WNDCLASSEXA);
+    window_class.lpfnWndProc = window_procedure;
+    window_class.hCursor = LoadCursor(null, IDC_ARROW);
+    window_class.hIcon = LoadIcon(null, IDI_APPLICATION);
+    window_class.lpszClassName = window_class_name;
+    window_class.style = Flag(WNDCLASS_STYLES).from_list(&window_class_style);
+
+    var hr = RegisterClassExA(&window_class);
     if (FAILED(hr)) {
         return Win32Errors.WindowClassRegistrationFailed;
     }
@@ -161,21 +159,21 @@ fn window_create(name: [*:0]const u8, width: i32, height: i32) !HWND {
     };
     var style_ex_list = [_]WINDOW_EX_STYLE{ WS_EX_APPWINDOW, WS_EX_WINDOWEDGE };
 
-    var win_style = Flag(WINDOW_STYLE).from_list(&style_list);
-    var win_style_ex = Flag(WINDOW_EX_STYLE).from_list(&style_ex_list);
+    var window_style = Flag(WINDOW_STYLE).from_list(&style_list);
+    var window_style_ex = Flag(WINDOW_EX_STYLE).from_list(&style_ex_list);
 
     var window_handle = CreateWindowExA(
-        win_style_ex,
-        win_class_name,
+        window_style_ex,
+        window_class_name,
         name,
-        win_style,
+        window_style,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         width,
         height,
         null,
         null,
-        win_class.hInstance,
+        window_class.hInstance,
         null,
     ) orelse return Win32Errors.WindowCreationFailed;
 
@@ -428,6 +426,9 @@ fn d3d11_term(state: *D3D11State) void {
     if (state.device == undefined) {
         return;
     }
+
+    _ = state.input_layout.IUnknown_Release();
+    _ = state.vertex_buffer.IUnknown_Release();
 
     d3d11_destroy_default_render_target(state);
 
