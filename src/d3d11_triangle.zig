@@ -9,6 +9,7 @@ usingnamespace win32.graphics.hlsl;
 usingnamespace win32.ui.windows_and_messaging;
 usingnamespace win32.system.library_loader;
 usingnamespace win32.system.diagnostics.debug;
+usingnamespace win32.system.com;
 
 pub fn Flag(comptime flag_type: type) type {
     return struct {
@@ -48,6 +49,8 @@ const Win32Errors = error{
 const D3D11Errors = error{
     InvalidSampleCount,
     FailedToCreateDXGIDevice,
+    FailedToGetDXGIAdapter,
+    FailedToGetDXGIFactory2,
     FailedToCreateD3D11Device,
     FailedToCreateD3D11DeviceContext,
     FailedToCreateD3D11Device1,
@@ -73,16 +76,13 @@ const D3D11Errors = error{
 const D3D11State = struct {
     device: *ID3D11Device1 = undefined,
     device_context: *ID3D11DeviceContext1 = undefined,
-
-    swap_chain: *IDXGISwapChain = undefined,
-    swap_chain_desc: DXGI_SWAP_CHAIN_DESC = undefined,
+    swap_chain: *IDXGISwapChain1 = undefined,
+    swap_chain_desc: DXGI_SWAP_CHAIN_DESC1 = undefined,
 
     render_target_buffer: *ID3D11Texture2D = undefined,
     render_target_view: *ID3D11RenderTargetView = undefined,
     depth_stencil_buffer: *ID3D11Texture2D = undefined,
     depth_stencil_view: *ID3D11DepthStencilView = undefined,
-
-    input_layout: *ID3D11InputLayout = undefined,
 
     vertex_shader: *ID3D11VertexShader = undefined,
     pixel_shader: *ID3D11PixelShader = undefined,
@@ -92,6 +92,7 @@ const D3D11State = struct {
     blend_state: *ID3D11BlendState1 = undefined,
     depth_stencil_state: *ID3D11DepthStencilState = undefined,
 
+    input_layout: *ID3D11InputLayout = undefined,
     vertex_buffer: *ID3D11Buffer = undefined,
 
     sample_count: u32 = 1,
@@ -216,6 +217,9 @@ fn d3d11_init(window_handle: HWND, sample_count: u32) !D3D11State {
     var base_device: *ID3D11Device = undefined;
     var base_device_context: *ID3D11DeviceContext = undefined;
     var device_flags: D3D11_CREATE_DEVICE_FLAG = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    device_flags = Flag(D3D11_CREATE_DEVICE_FLAG).combine(device_flags, D3D11_CREATE_DEVICE_SINGLETHREADED);
+    device_flags = Flag(D3D11_CREATE_DEVICE_FLAG).combine(device_flags, D3D11_CREATE_DEVICE_DEBUG);
+
     var hr = D3D11CreateDevice(
         null,
         D3D_DRIVER_TYPE_HARDWARE,
@@ -253,57 +257,54 @@ fn d3d11_init(window_handle: HWND, sample_count: u32) !D3D11State {
         return D3D11Errors.FailedToCreateDXGIDevice;
     }
 
-    // Cleanup
-    _ = base_device.IUnknown_Release();
+    hr = dxgi_device.IDXGIDevice_GetAdapter(&dxgi_adapter);
+    if (FAILED(hr)) {
+        return D3D11Errors.FailedToGetDXGIAdapter;
+    }
+
+    hr = dxgi_adapter.IDXGIObject_GetParent(IID_IDXGIFactory2, @ptrCast(**c_void, &dxgi_factory));
+    if (FAILED(hr)) {
+        return D3D11Errors.FailedToGetDXGIFactory2;
+    }
 
     state.width = @intCast(u32, window_rectangle.right - window_rectangle.left);
     state.height = @intCast(u32, window_rectangle.bottom - window_rectangle.top);
     state.sample_count = sample_count;
-    state.swap_chain_desc = DXGI_SWAP_CHAIN_DESC{
-        .BufferDesc = DXGI_MODE_DESC{
-            .Width = state.width,
-            .Height = state.height,
-            .Format = DXGI_FORMAT_B8G8R8A8_UNORM,
-            .ScanlineOrdering = DXGI_MODE_SCANLINE_ORDER_UNSPECIFIED,
-            .Scaling = DXGI_MODE_SCALING_UNSPECIFIED,
-            .RefreshRate = DXGI_RATIONAL{
-                .Numerator = 60,
-                .Denominator = 1,
-            },
-        },
+    state.swap_chain_desc = DXGI_SWAP_CHAIN_DESC1{
+        .Width = 0,
+        .Height = 0,
+        .Format = DXGI_FORMAT_B8G8R8A8_UNORM,
+        .Stereo = FALSE,
         .SampleDesc = DXGI_SAMPLE_DESC{
             .Count = state.sample_count,
             .Quality = 0,
         },
         .BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT,
         .BufferCount = 1,
+        .Scaling = DXGI_SCALING_STRETCH,
         .SwapEffect = DXGI_SWAP_EFFECT_DISCARD,
-        .OutputWindow = window_handle,
-        .Windowed = TRUE,
+        .AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED,
         .Flags = 0,
     };
 
-    var create_flags = D3D11_CREATE_DEVICE_SINGLETHREADED;
-    create_flags = Flag(D3D11_CREATE_DEVICE_FLAG).combine(create_flags, D3D11_CREATE_DEVICE_DEBUG);
-
-    var feature_level: D3D_FEATURE_LEVEL = D3D_FEATURE_LEVEL_11_0;
-
-    hr = D3D11CreateDeviceAndSwapChain(null, // pAdapter (use default)
-        D3D_DRIVER_TYPE_HARDWARE, // DriverType
-        LoadLibraryA("dummy"), // Need a way to pass NULL here // Software
-        create_flags, // Flags
-        null, // pFeatureLevels
-        0, // FeatureLevels
-        D3D11_SDK_VERSION, // SDKVersion
-        &state.swap_chain_desc, // pSwapChainDesc
-        &state.swap_chain, // ppSwapChain
-        &state.device, // ppDevice
-        &feature_level, // pFeatureLevel
-        &state.device_context); // ppImmediateContext
-
+    hr = dxgi_factory.IDXGIFactory2_CreateSwapChainForHwnd(
+        @ptrCast(*IUnknown, state.device),
+        window_handle,
+        &state.swap_chain_desc,
+        null,
+        null,
+        &state.swap_chain,
+    );
     if (FAILED(hr)) {
-        return D3D11Errors.FailedToCreateDeviceAndSwapchain;
+        return D3D11Errors.FailedToCreateSwapchain;
     }
+
+    // Cleanup
+    _ = base_device.IUnknown_Release();
+    _ = base_device_context.IUnknown_Release();
+    _ = dxgi_device.IUnknown_Release();
+    _ = dxgi_adapter.IUnknown_Release();
+    _ = dxgi_factory.IUnknown_Release();
 
     // Render targets - TODO(maciej): Inline this maybe? Seems like for this demo app we would like to have everything just as a big linear function
     try d3d11_create_default_render_target(&state);
@@ -329,21 +330,22 @@ fn d3d11_init(window_handle: HWND, sample_count: u32) !D3D11State {
         return D3D11Errors.FailedToCreateDepthStencilState;
     }
 
-    var rasterizer_state_desc = std.mem.zeroes(D3D11_RASTERIZER_DESC);
+    var rasterizer_state_desc = std.mem.zeroes(D3D11_RASTERIZER_DESC1);
     rasterizer_state_desc.FrontCounterClockwise = TRUE;
     rasterizer_state_desc.FillMode = D3D11_FILL_SOLID;
     rasterizer_state_desc.CullMode = D3D11_CULL_BACK;
 
-    hr = state.device.ID3D11Device_CreateRasterizerState(&rasterizer_state_desc, &state.rasterizer_state);
+    hr = state.device.ID3D11Device1_CreateRasterizerState1(&rasterizer_state_desc, &state.rasterizer_state);
     if (FAILED(hr)) {
         return D3D11Errors.FailedToCreateRasterizerState;
     }
 
-    var blend_state_desc = std.mem.zeroes(D3D11_BLEND_DESC);
+    var blend_state_desc = std.mem.zeroes(D3D11_BLEND_DESC1);
     blend_state_desc.AlphaToCoverageEnable = FALSE;
     blend_state_desc.IndependentBlendEnable = FALSE;
     blend_state_desc.RenderTarget[0] = .{
         .BlendEnable = TRUE,
+        .LogicOpEnable = FALSE,
         .SrcBlend = D3D11_BLEND_SRC_ALPHA,
         .DestBlend = D3D11_BLEND_INV_SRC_ALPHA,
         .BlendOp = D3D11_BLEND_OP_ADD,
@@ -351,9 +353,10 @@ fn d3d11_init(window_handle: HWND, sample_count: u32) !D3D11State {
         .DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA,
         .BlendOpAlpha = D3D11_BLEND_OP_ADD,
         .RenderTargetWriteMask = @enumToInt(D3D11_COLOR_WRITE_ENABLE_ALL),
+        .LogicOp = D3D11_LOGIC_OP_CLEAR,
     };
 
-    hr = state.device.ID3D11Device_CreateBlendState(&blend_state_desc, &state.blend_state);
+    hr = state.device.ID3D11Device1_CreateBlendState1(&blend_state_desc, &state.blend_state);
     if (FAILED(hr)) {
         return D3D11Errors.FailedToCreateBlendState;
     }
@@ -478,20 +481,20 @@ fn d3d11_term(state: *D3D11State) void {
         return;
     }
 
+    d3d11_destroy_default_render_target(state);
+
     _ = state.input_layout.IUnknown_Release();
     _ = state.vertex_buffer.IUnknown_Release();
-
-    d3d11_destroy_default_render_target(state);
 
     _ = state.rasterizer_state.IUnknown_Release();
     _ = state.depth_stencil_state.IUnknown_Release();
     _ = state.sampler_state.IUnknown_Release();
     _ = state.blend_state.IUnknown_Release();
 
-    state.rasterizer_state = undefined;
-    state.depth_stencil_state = undefined;
     state.sampler_state = undefined;
+    state.rasterizer_state = undefined;
     state.blend_state = undefined;
+    state.depth_stencil_state = undefined;
 
     _ = state.vertex_shader.IUnknown_Release();
     _ = state.pixel_shader.IUnknown_Release();
@@ -531,18 +534,10 @@ fn d3d11_create_default_render_target(state: *D3D11State) !void {
         return D3D11Errors.FailedToCreateRenderTargetView;
     }
 
-    var depth_stencil_desc = D3D11_TEXTURE2D_DESC{
-        .Width = state.width,
-        .Height = state.height,
-        .MipLevels = 1,
-        .ArraySize = 1,
-        .Format = DXGI_FORMAT_D24_UNORM_S8_UINT,
-        .SampleDesc = state.swap_chain_desc.SampleDesc,
-        .Usage = D3D11_USAGE_DEFAULT,
-        .BindFlags = D3D11_BIND_DEPTH_STENCIL,
-        .CPUAccessFlags = @intToEnum(D3D11_CPU_ACCESS_FLAG, 0),
-        .MiscFlags = @intToEnum(D3D11_RESOURCE_MISC_FLAG, 0),
-    };
+    var depth_stencil_desc: D3D11_TEXTURE2D_DESC = undefined;
+    state.render_target_buffer.ID3D11Texture2D_GetDesc(&depth_stencil_desc);
+    depth_stencil_desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    depth_stencil_desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
 
     hr = state.device.ID3D11Device_CreateTexture2D(&depth_stencil_desc, null, &state.depth_stencil_buffer);
     if (FAILED(hr)) {
@@ -631,7 +626,7 @@ pub fn main() !void {
         var rects = [_]RECT{window_rectangle};
         state.device_context.ID3D11DeviceContext_RSSetViewports(viewports.len, &viewports);
         state.device_context.ID3D11DeviceContext_RSSetScissorRects(rects.len, &rects);
-        state.device_context.ID3D11DeviceContext_RSSetState(state.rasterizer_state);
+        state.device_context.ID3D11DeviceContext_RSSetState(@ptrCast(*ID3D11RasterizerState, state.rasterizer_state));
 
         var clear_color = [_]f32{ 1.0, 0.5, 0.0, 1.0 };
         state.device_context.ID3D11DeviceContext_ClearRenderTargetView(rtvs[0], &clear_color[0]);
@@ -640,7 +635,7 @@ pub fn main() !void {
 
         var blend_color = [_]f32{ 1.0, 1.0, 1.0, 1.0 };
         state.device_context.ID3D11DeviceContext_OMSetDepthStencilState(state.depth_stencil_state, 0);
-        state.device_context.ID3D11DeviceContext_OMSetBlendState(state.blend_state, &blend_color[0], 0xFFFFFFFF);
+        state.device_context.ID3D11DeviceContext_OMSetBlendState(@ptrCast(*ID3D11BlendState, state.blend_state), &blend_color[0], 0xFFFFFFFF);
 
         state.device_context.ID3D11DeviceContext_IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         state.device_context.ID3D11DeviceContext_IASetInputLayout(state.input_layout);
