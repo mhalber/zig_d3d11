@@ -1,5 +1,6 @@
 const std = @import("std");
 const win32 = @import("win32");
+const msh_math = @import("msh_math");
 usingnamespace win32.zig;
 usingnamespace win32.foundation;
 usingnamespace win32.graphics.gdi;
@@ -10,6 +11,8 @@ usingnamespace win32.ui.windows_and_messaging;
 usingnamespace win32.system.library_loader;
 usingnamespace win32.system.diagnostics.debug;
 usingnamespace win32.system.com;
+
+// NOTE(maciej): The std library seems to provide zero init function
 
 pub fn Flag(comptime flag_type: type) type {
     return struct {
@@ -46,31 +49,10 @@ const Win32Errors = error{
     InvalidWindowHandle,
 };
 
-const D3D11Errors = error{
-    InvalidSampleCount,
-    FailedToCreateDXGIDevice,
-    FailedToGetDXGIAdapter,
-    FailedToGetDXGIFactory2,
-    FailedToCreateD3D11Device,
-    FailedToCreateD3D11DeviceContext,
-    FailedToCreateD3D11Device1,
-    FailedToCreateD3D11DeviceContext1,
-    FailedToCreateD3D11DeviceAndSwapchain,
-    FailedToCreateSwapchain,
-    FailedToObtainBufferFromSwapChain,
-    FailedToCreateTexture2D,
-    FailedToCreateRenderTargetView,
-    FailedToCreateDepthStencilView,
-    FailedToCreateRasterizerState,
-    FailedToCreateSamplerState,
-    FailedToCreateBlendState,
-    FailedToCreateDepthStencilState,
-    FailedToCompileShader,
-    FailedToCreateVertexShader,
-    FailedToCreatePixelShader,
-    FailedToCreateComputeShader,
-    FailedToCreateInputLayout,
-    FailedToCreateBuffer,
+const D3D11Errors = error{ InvalidSampleCount, FailedToCreateDXGIDevice, FailedToGetDXGIAdapter, FailedToGetDXGIFactory2, FailedToCreateD3D11Device, FailedToCreateD3D11DeviceContext, FailedToCreateD3D11Device1, FailedToCreateD3D11DeviceContext1, FailedToCreateD3D11DeviceAndSwapchain, FailedToCreateSwapchain, FailedToObtainBufferFromSwapChain, FailedToCreateTexture2D, FailedToCreateRenderTargetView, FailedToCreateDepthStencilView, FailedToCreateRasterizerState, FailedToCreateSamplerState, FailedToCreateBlendState, FailedToCreateDepthStencilState, FailedToCompileShader, FailedToCreateVertexShader, FailedToCreatePixelShader, FailedToCreateComputeShader, FailedToCreateInputLayout, FailedToCreateBuffer, FailedToCreateShaderResourceView, FailedToMapResource };
+
+const Constants = struct {
+    projection: [16]f32 = .{0} ** 16,
 };
 
 const D3D11State = struct {
@@ -94,6 +76,12 @@ const D3D11State = struct {
 
     input_layout: *ID3D11InputLayout = undefined,
     vertex_buffer: *ID3D11Buffer = undefined,
+
+    constant_buffer: *ID3D11Buffer = undefined,
+    texture: *ID3D11Texture2D = undefined,
+    texture_view: *ID3D11ShaderResourceView = undefined,
+
+    constants: *Constants = undefined,
 
     sample_count: u32 = 1,
     width: u32 = 512,
@@ -311,7 +299,7 @@ fn d3d11_init(window_handle: HWND, sample_count: u32) !D3D11State {
 
     // Pipeline state
     var sampler_state_desc = std.mem.zeroes(D3D11_SAMPLER_DESC);
-    sampler_state_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler_state_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
     sampler_state_desc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
     sampler_state_desc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
     sampler_state_desc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
@@ -363,15 +351,24 @@ fn d3d11_init(window_handle: HWND, sample_count: u32) !D3D11State {
 
     // Shaders
     const shdr_src =
+        \\  cbuffer constant
+        \\  {
+        \\    row_major float4x4 projection;
+        \\  }
+        \\Texture2D mytexture;
+        \\SamplerState mysampler;
         \\struct vs_in {
         \\   float4 pos: POS0;
+        \\   float2 uv: TEX;
         \\};
         \\struct vs_out {
         \\   float4 pos: SV_POSITION;
+        \\   float2 uv: TEX;
         \\};
         \\vs_out vs_main(vs_in input) {
         \\    vs_out output;
-        \\    output.pos = input.pos;
+        \\    output.pos = mul(projection, input.pos);
+        \\    output.uv = input.uv;
         \\    return output;
         \\}
         \\
@@ -382,7 +379,7 @@ fn d3d11_init(window_handle: HWND, sample_count: u32) !D3D11State {
     var vs_output: *ID3DBlob = undefined;
     var ps_output: *ID3DBlob = undefined;
     var errors: *ID3DBlob = undefined;
-    var compile_flags: u32 = D3DCOMPILE_PACK_MATRIX_COLUMN_MAJOR | D3DCOMPILE_OPTIMIZATION_LEVEL3;
+    var compile_flags: u32 = D3DCOMPILE_PACK_MATRIX_ROW_MAJOR | D3DCOMPILE_OPTIMIZATION_LEVEL3;
     _ = D3DCompile(shdr_src, shdr_src.len, null, null, null, "vs_main", "vs_5_0", compile_flags, 0, &vs_output, &errors);
     if (errors != undefined) {
         var err_str_ptr = @ptrCast([*]const u8, errors.ID3DBlob_GetBufferPointer());
@@ -416,21 +413,15 @@ fn d3d11_init(window_handle: HWND, sample_count: u32) !D3D11State {
         null,
         &state.pixel_shader,
     );
+
     if (FAILED(hr)) {
         return D3D11Errors.FailedToCreatePixelShader;
     }
 
     // Input layout
-    var input_layout_desc = [1]D3D11_INPUT_ELEMENT_DESC{
-        .{
-            .SemanticName = "POS",
-            .SemanticIndex = 0,
-            .Format = DXGI_FORMAT_R32G32B32A32_FLOAT,
-            .AlignedByteOffset = 0,
-            .InputSlot = 0,
-            .InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA,
-            .InstanceDataStepRate = 0,
-        },
+    var input_layout_desc = [_]D3D11_INPUT_ELEMENT_DESC{
+        .{ .SemanticName = "POS", .SemanticIndex = 0, .Format = DXGI_FORMAT_R32G32B32A32_FLOAT, .AlignedByteOffset = 0, .InputSlot = 0, .InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA, .InstanceDataStepRate = 0 },
+        .{ .SemanticName = "TEX", .SemanticIndex = 0, .Format = DXGI_FORMAT_R32G32_FLOAT, .AlignedByteOffset = 0, .InputSlot = 0, .InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA, .InstanceDataStepRate = 0 },
     };
     hr = state.device.ID3D11Device_CreateInputLayout(
         &input_layout_desc,
@@ -445,21 +436,40 @@ fn d3d11_init(window_handle: HWND, sample_count: u32) !D3D11State {
     _ = vs_output.IUnknown_Release();
     _ = ps_output.IUnknown_Release();
 
-    var positions = [12]f32{
-        0.0, 0.0, 0.0, 1.0,
-        1.0, 0.0, 0.0, 1.0,
-        0.0, 1.0, 0.0, 1.0,
+    // Create storage for constant buffer
+    var constant_buffer_desc = D3D11_BUFFER_DESC{
+        .ByteWidth = 16 * @sizeOf(f32),
+        .Usage = D3D11_USAGE_DYNAMIC,
+        .BindFlags = @enumToInt(D3D11_BIND_CONSTANT_BUFFER),
+        .CPUAccessFlags = @enumToInt(D3D11_CPU_ACCESS_WRITE),
+        .MiscFlags = 0,
+        .StructureByteStride = 0,
     };
+
+    // Create constant buffer
+    hr = state.device.ID3D11Device_CreateBuffer(&constant_buffer_desc, null, &state.constant_buffer);
+    if (FAILED(hr)) {
+        return D3D11Errors.FailedToCreateBuffer;
+    }
+
+    // Create vertex buffer
+    var vertex_data = [18]f32{
+        0.0,     0.0,     -10.0, 1.0, 0.0, 0.0,
+        10000.0, 0.0,     -10.0, 1.0, 1.0, 0.0,
+        0.0,     10000.0, -10.0, 1.0, 0.0, 1.0,
+    };
+
     var vertex_buffer_desc = D3D11_BUFFER_DESC{
-        .ByteWidth = positions.len * @sizeOf(f32),
+        .ByteWidth = vertex_data.len * @sizeOf(f32),
         .Usage = D3D11_USAGE_DEFAULT,
         .BindFlags = @enumToInt(D3D11_BIND_VERTEX_BUFFER),
         .CPUAccessFlags = 0,
         .MiscFlags = 0,
         .StructureByteStride = 0,
     };
+
     var vertex_buffer_data = D3D11_SUBRESOURCE_DATA{
-        .pSysMem = &positions,
+        .pSysMem = &vertex_data,
         .SysMemPitch = 0,
         .SysMemSlicePitch = 0,
     };
@@ -471,6 +481,36 @@ fn d3d11_init(window_handle: HWND, sample_count: u32) !D3D11State {
     );
     if (FAILED(hr)) {
         return D3D11Errors.FailedToCreateBuffer;
+    }
+
+    var texture_data = [_]u8{
+        255, 255, 255, 255, 0,   0,   0,   25,  255, 255, 255, 255, 0,   0,   0,   25,
+        0,   0,   0,   25,  255, 255, 255, 255, 0,   0,   0,   25,  255, 255, 255, 255,
+        255, 255, 255, 255, 0,   0,   0,   25,  255, 255, 255, 255, 0,   0,   0,   25,
+        0,   0,   0,   25,  255, 255, 255, 255, 0,   0,   0,   25,  255, 255, 255, 255,
+    };
+
+    var texture_desc = std.mem.zeroes(D3D11_TEXTURE2D_DESC);
+    texture_desc.Width = 4;
+    texture_desc.Height = 4;
+    texture_desc.MipLevels = 1;
+    texture_desc.ArraySize = 1;
+    texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    texture_desc.SampleDesc = .{ .Count = 1, .Quality = 0 };
+    texture_desc.Usage = D3D11_USAGE_IMMUTABLE;
+    texture_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+    var texture_subresource_data = std.mem.zeroes(D3D11_SUBRESOURCE_DATA);
+    texture_subresource_data.pSysMem = @ptrCast(*c_void, &texture_data[0]);
+    texture_subresource_data.SysMemPitch = 4 * 4;
+
+    hr = state.device.ID3D11Device_CreateTexture2D(&texture_desc, &texture_subresource_data, &state.texture);
+    if (FAILED(hr)) {
+        return D3D11Errors.FailedToCreateTexture2D;
+    }
+    hr = state.device.ID3D11Device_CreateShaderResourceView(@ptrCast(*ID3D11Resource, state.texture), null, &state.texture_view);
+    if (FAILED(hr)) {
+        return D3D11Errors.FailedToCreateShaderResourceView;
     }
 
     return state;
@@ -614,6 +654,10 @@ pub fn main() !void {
         // Begins a render pass
         var window_rectangle: RECT = undefined;
         _ = GetClientRect(window_handle, &window_rectangle);
+        var n: f32 = 0.1;
+        var f: f32 = 1000.0;
+        var w: f32 = @intToFloat(f32, window_rectangle.right - window_rectangle.left);
+        var h: f32 = @intToFloat(f32, window_rectangle.top - window_rectangle.bottom);
 
         var rtvs = [_]*ID3D11RenderTargetView{state.render_target_view};
         state.device_context.ID3D11DeviceContext_OMSetRenderTargets(1, &rtvs, state.depth_stencil_view);
@@ -637,15 +681,32 @@ pub fn main() !void {
         state.device_context.ID3D11DeviceContext_OMSetDepthStencilState(state.depth_stencil_state, 0);
         state.device_context.ID3D11DeviceContext_OMSetBlendState(@ptrCast(*ID3D11BlendState, state.blend_state), &blend_color[0], 0xFFFFFFFF);
 
+        var buffers = [_]*ID3D11Buffer{state.vertex_buffer};
+        var strides = [_]u32{6 * @sizeOf(f32)};
+        var offsets = [_]u32{0};
         state.device_context.ID3D11DeviceContext_IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         state.device_context.ID3D11DeviceContext_IASetInputLayout(state.input_layout);
-        var buffers = [_]*ID3D11Buffer{state.vertex_buffer};
-        var strides = [_]u32{4 * @sizeOf(f32)};
-        var offsets = [_]u32{0};
-
         state.device_context.ID3D11DeviceContext_IASetVertexBuffers(0, buffers.len, &buffers, &strides, &offsets);
+
+        var constant_buffer_data = std.mem.zeroInit(D3D11_MAPPED_SUBRESOURCE, .{});
+        var hr = state.device_context.ID3D11DeviceContext_Map(@ptrCast(*ID3D11Resource, state.constant_buffer), 0, D3D11_MAP_WRITE_DISCARD, 0, &constant_buffer_data);
+        if (SUCCEEDED(hr)) {
+            state.constants = @ptrCast(*Constants, @alignCast(4, constant_buffer_data.pData));
+            state.constants.projection = .{ 2 * n / w, 0, 0, 0, 0, 2 * n / h, 0, 0, 0, 0, f / (f - n), 1, 0, 0, n * f / (n - f), 0 };
+            state.device_context.ID3D11DeviceContext_Unmap(@ptrCast(*ID3D11Resource, state.constant_buffer), 0);
+        } else {
+            return D3D11Errors.FailedToMapResource;
+        }
+
+        var constant_buffers = [_]*ID3D11Buffer{state.constant_buffer};
         state.device_context.ID3D11DeviceContext_VSSetShader(state.vertex_shader, null, 0);
+        state.device_context.ID3D11DeviceContext_VSSetConstantBuffers(0, constant_buffers.len, &constant_buffers);
+
+        var samplers = [_]*ID3D11SamplerState{state.sampler_state};
+        var resources = [_]*ID3D11ShaderResourceView{state.texture_view};
         state.device_context.ID3D11DeviceContext_PSSetShader(state.pixel_shader, null, 0);
+        state.device_context.ID3D11DeviceContext_PSSetSamplers(0, samplers.len, &samplers);
+        state.device_context.ID3D11DeviceContext_PSSetShaderResources(0, resources.len, &resources);
 
         state.device_context.ID3D11DeviceContext_Draw(3, 0);
 
