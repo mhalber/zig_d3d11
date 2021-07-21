@@ -1,6 +1,7 @@
 const std = @import("std");
 const win32 = @import("win32");
 const msh_math = @import("msh_math");
+// const math = @import("std\mat")
 usingnamespace win32.zig;
 usingnamespace win32.foundation;
 usingnamespace win32.graphics.gdi;
@@ -89,6 +90,31 @@ const D3D11State = struct {
     valid_render_target: bool = false,
 };
 
+fn frustum(left: f32, right: f32, bottom: f32, top: f32, z_near: f32, z_far: f32) [16]f32 {
+    var x_diff: f32 = right - left;
+    var y_diff: f32 = top - bottom;
+    var z_diff: f32 = z_far - z_near;
+    var a: f32 = (right + left) / x_diff;
+    var b: f32 = (top + bottom) / y_diff;
+    var c: f32 = -(z_far + z_near) / z_diff;
+    var d: f32 = -(2.0 * z_far * z_near) / z_diff;
+
+    var mat = [16]f32{
+        (2.0 * z_near) / x_diff, 0.0,                     0.0, 0.0,
+        0.0,                     (2.0 * z_near) / y_diff, 0.0, 0.0,
+        a,                       b,                       c,   -1.0,
+        0.0,                     0.0,                     d,   0.0,
+    };
+    return mat;
+}
+
+fn perspective(fovy: f32, aspect: f32, z_near: f32, z_far: f32) [16]f32 {
+    var ymax: f32 = z_near * std.math.tan(fovy * 0.5);
+    var ymin: f32 = -ymax;
+    var xmin: f32 = ymin * aspect;
+    var xmax: f32 = ymax * aspect;
+    return frustum(xmin, xmax, ymin, ymax, z_near, z_far);
+}
 fn window_procedure(window_handle: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) callconv(.C) LRESULT {
     switch (message) {
         WM_DESTROY => {
@@ -353,7 +379,7 @@ fn d3d11_init(window_handle: HWND, sample_count: u32) !D3D11State {
     const shdr_src =
         \\  cbuffer constant
         \\  {
-        \\    row_major float4x4 projection;
+        \\    float4x4 projection;
         \\  }
         \\Texture2D mytexture;
         \\SamplerState mysampler;
@@ -379,7 +405,7 @@ fn d3d11_init(window_handle: HWND, sample_count: u32) !D3D11State {
     var vs_output: *ID3DBlob = undefined;
     var ps_output: *ID3DBlob = undefined;
     var errors: *ID3DBlob = undefined;
-    var compile_flags: u32 = D3DCOMPILE_PACK_MATRIX_ROW_MAJOR | D3DCOMPILE_OPTIMIZATION_LEVEL3;
+    var compile_flags: u32 = D3DCOMPILE_PACK_MATRIX_COLUMN_MAJOR | D3DCOMPILE_OPTIMIZATION_LEVEL3;
     _ = D3DCompile(shdr_src, shdr_src.len, null, null, null, "vs_main", "vs_5_0", compile_flags, 0, &vs_output, &errors);
     if (errors != undefined) {
         var err_str_ptr = @ptrCast([*]const u8, errors.ID3DBlob_GetBufferPointer());
@@ -454,9 +480,9 @@ fn d3d11_init(window_handle: HWND, sample_count: u32) !D3D11State {
 
     // Create vertex buffer
     var vertex_data = [18]f32{
-        0.0,     0.0,     -10.0, 1.0, 0.0, 0.0,
-        10000.0, 0.0,     -10.0, 1.0, 1.0, 0.0,
-        0.0,     10000.0, -10.0, 1.0, 0.0, 1.0,
+        0.0, 0.0, -1.0, 1.0, 0.0, 0.0,
+        0.0, 1.0, -1.0, 1.0, 0.0, 1.0,
+        1.0, 0.0, -1.0, 1.0, 1.0, 0.0,
     };
 
     var vertex_buffer_desc = D3D11_BUFFER_DESC{
@@ -692,7 +718,7 @@ pub fn main() !void {
         var hr = state.device_context.ID3D11DeviceContext_Map(@ptrCast(*ID3D11Resource, state.constant_buffer), 0, D3D11_MAP_WRITE_DISCARD, 0, &constant_buffer_data);
         if (SUCCEEDED(hr)) {
             state.constants = @ptrCast(*Constants, @alignCast(4, constant_buffer_data.pData));
-            state.constants.projection = .{ 2 * n / w, 0, 0, 0, 0, 2 * n / h, 0, 0, 0, 0, f / (f - n), 1, 0, 0, n * f / (n - f), 0 };
+            state.constants.projection = perspective(1.047198, w / h, 0.1, 10.0);
             state.device_context.ID3D11DeviceContext_Unmap(@ptrCast(*ID3D11Resource, state.constant_buffer), 0);
         } else {
             return D3D11Errors.FailedToMapResource;
