@@ -6,7 +6,6 @@ pub fn build(b: *Builder) void {
     const exe = b.addExecutable("d3d11_traingle", "src/d3d11_triangle.zig");
 
     exe.addPackagePath("win32", "../zig-win32/win32.zig");
-    exe.addPackagePath("msh_math", "../msh_math/src/vec_math.zig");
     exe.setTarget(.{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu });
     exe.setBuildMode(mode);
     exe.install();
